@@ -1,1 +1,1 @@
-# multimedia-compression
+# multimedia-compression:  Multimedia compression uses algorithms to reduce the size of files like images, audio, and video to save storage space and speed up transmission. There are two main types: lossless compression, which allows the original file to be perfectly reconstructed, and lossy compression, which achieves greater file size reduction by discarding some data that is less perceptible to humans. These techniques use codecs, which are software or hardware that perform both compression (encoding) and decompression (decoding). 
