@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
-import os
-from compression import compress_video  # Keep your existing video compression
+import os, sys # Example with commas
+from compression import compress_video
 from PIL import Image
 from compression import compress_audio 
 
