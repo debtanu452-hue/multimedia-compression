@@ -1,94 +1,177 @@
-from flask import Flask, request, jsonify, send_from_directory
-import os, sys # Example with commas
-from compression import compress_video
+import cv2
+import numpy as np
+import heapq
+from collections import defaultdict
 from PIL import Image
-from compression import compress_audio 
+import wave
+import contextlib
 
-app = Flask(__name__, static_folder="static")
-UPLOAD_FOLDER = "uploads"
-COMPRESSED_FOLDER = os.path.join(UPLOAD_FOLDER, "compressed")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(COMPRESSED_FOLDER, exist_ok=True)
+# ==========================
+# Existing Video Compression
+# ==========================
 
-# Helper to save uploaded file
-def save_file(file):
-    filename = file.filename
-    input_path = os.path.join(UPLOAD_FOLDER, filename)
-    file.save(input_path)
-    return input_path, filename
+# Define Large Diamond Search Pattern (LDSP) and Small Diamond Search Pattern (SDSP)
+LDSP = [(-2, 0), (0, -2), (0, 2), (2, 0), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+SDSP = [(0, -1), (-1, 0), (1, 0), (0, 1)]
 
-# Serve frontend
-@app.route("/")
-def index():
-    return send_from_directory("static", "index.html")
+class HuffmanNode:
+    def _init_(self, symbol, freq):
+        self.symbol = symbol
+        self.freq = freq
+        self.left = None
+        self.right = None
 
-# Serve uploaded/compressed files
-@app.route("/uploads/<path:filename>")
-def serve_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=False)
+    def _lt_(self, other):
+        return self.freq < other.freq
 
-# ----------------- IMAGE -----------------
-def compress_image_file(input_path, output_path, quality=30):
-    img = Image.open(input_path)
-    img = img.convert("RGB")
-    img.save(output_path, "JPEG", optimize=True, quality=quality)
+def diamond_search(reference_frame, target_frame, block_size=16, search_range=4):
+    height, width = reference_frame.shape
+    motion_vectors = np.zeros((height // block_size, width // block_size, 2), dtype=int)
 
-@app.route("/compress/image", methods=["POST"])
-def compress_image_route():
-    if "file" not in request.files:
-        return jsonify({"status":"error", "message":"No file uploaded"}), 400
+    for i in range(0, height - block_size + 1, block_size):
+        for j in range(0, width - block_size + 1, block_size):
+            best_x, best_y = 0, 0
+            min_error = float('inf')
 
-    file = request.files["file"]
-    input_path, filename = save_file(file)
-    name, ext = os.path.splitext(filename)
-    compressed_path = os.path.join(COMPRESSED_FOLDER, f"{name}_compressed.jpg")
+            for dx, dy in LDSP:
+                x, y = j + dx, i + dy
+                x, y = max(0, min(width - block_size, x)), max(0, min(height - block_size, y))
+                error = np.sum(np.abs(target_frame[y:y+block_size, x:x+block_size] -
+                                      reference_frame[i:i+block_size, j:j+block_size]))
+                if error < min_error:
+                    min_error = error
+                    best_x, best_y = dx, dy
+
+            for dx, dy in SDSP:
+                x, y = j + best_x + dx, i + best_y + dy
+                x, y = max(0, min(width - block_size, x)), max(0, min(height - block_size, y))
+                error = np.sum(np.abs(target_frame[y:y+block_size, x:x+block_size] -
+                                      reference_frame[i:i+block_size, j:j+block_size]))
+                if error < min_error:
+                    min_error = error
+                    best_x += dx
+                    best_y += dy
+
+            motion_vectors[i // block_size, j // block_size] = (best_x, best_y)
     
-    compress_image_file(input_path, compressed_path)
+    return motion_vectors
 
-    return jsonify({
-        "status": "success",
-        "compressed_file": f"/uploads/compressed/{name}_compressed.jpg",
-        "preview": f"/uploads/compressed/{name}_compressed.jpg"
-    })
+def build_huffman_tree(freq_map):
+    heap = [HuffmanNode(symbol, freq) for symbol, freq in freq_map.items()]
+    heapq.heapify(heap)
+    while len(heap) > 1:
+        left = heapq.heappop(heap)
+        right = heapq.heappop(heap)
+        merged = HuffmanNode(None, left.freq + right.freq)
+        merged.left, merged.right = left, right
+        heapq.heappush(heap, merged)
+    return heap[0] if heap else None
 
-# ----------------- VIDEO -----------------
-@app.route("/compress/video", methods=["POST"])
-def compress_video_route():
-    if "file" not in request.files:
-        return jsonify({"status":"error", "message":"No file uploaded"}), 400
+def generate_huffman_codes(node, prefix="", code_map=None):
+    if code_map is None:
+        code_map = {}
+    if node:
+        if node.symbol is not None:
+            code_map[node.symbol] = prefix
+        generate_huffman_codes(node.left, prefix + "0", code_map)
+        generate_huffman_codes(node.right, prefix + "1", code_map)
+    return code_map
 
-    file = request.files["file"]
-    input_path, filename = save_file(file)
+def dynamic_huffman_encoding(motion_vectors):
+    flat_mvs = motion_vectors.reshape(-1, 2)
+    freq_map = defaultdict(int)
+    for mv in map(tuple, flat_mvs):
+        freq_map[mv] += 1
+    root = build_huffman_tree(freq_map)
+    if root is None:
+        return "", {}
+    huffman_codes = generate_huffman_codes(root)
+    encoded_data = "".join(huffman_codes[tuple(mv)] for mv in map(tuple, flat_mvs))
+    return encoded_data, huffman_codes
 
-    compressed_data, huffman_codes = compress_video(input_path)
-    # For now, we just move the file as "compressed" (replace with real compressed video later)
-    compressed_path = os.path.join(COMPRESSED_FOLDER, filename)
-    os.rename(input_path, compressed_path)
+def compress_video(video_path):
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        print("Error: Unable to open video file.")
+        return None, None
+    ret, reference_frame = cap.read()
+    if not ret:
+        print("Error: Unable to read the first frame.")
+        cap.release()
+        return None, None
+    reference_frame = cv2.cvtColor(reference_frame, cv2.COLOR_BGR2GRAY)
+    compressed_data = []
+    huffman_codes = {}
+    while True:
+        ret, target_frame = cap.read()
+        if not ret:
+            break
+        target_frame = cv2.cvtColor(target_frame, cv2.COLOR_BGR2GRAY)
+        motion_vectors = diamond_search(reference_frame, target_frame)
+        encoded_mv, huffman_codes = dynamic_huffman_encoding(motion_vectors)
+        compressed_data.append(encoded_mv)
+        reference_frame = target_frame
+    cap.release()
+    return compressed_data, huffman_codes
 
-    return jsonify({
-        "status": "success",
-        "compressed_file": f"/uploads/compressed/{filename}",
-        "preview": f"/uploads/compressed/{filename}"
-    })
+# ==========================
+# New: Image Compression
+# ==========================
+def compress_image(image_path, resize_factor=0.5):
+    img = Image.open(image_path).convert("L")  # grayscale
+    width, height = img.size
+    img_resized = img.resize((int(width*resize_factor), int(height*resize_factor)))
+    compressed_path = image_path.replace(".", "_compressed.")
+    img_resized.save(compressed_path)
+    return compressed_path
 
+# ==========================
+# New: Audio Compression
+# ==========================
+def compress_audio(audio_path):
+    # Example: just copy first half of audio (placeholder)
+    with contextlib.closing(wave.open(audio_path, 'rb')) as wf:
+        params = wf.getparams()
+        n_frames = wf.getnframes()
+        frames = wf.readframes(n_frames//2)  # take first half
+    compressed_path = audio_path.replace(".", "_compressed.")
+    with wave.open(compressed_path, 'wb') as wf_out:
+        wf_out.setparams(params)
+        wf_out.writeframes(frames)
+    return compressed_path
 
-
-@app.route("/compress/audio", methods=["POST"])
-def compress_audio_route():
-    if "file" not in request.files:
-        return jsonify({"status":"error", "message":"No file uploaded"}), 400
-
-    file = request.files["file"]
-    input_path, filename = save_file(file)
-
-    compressed_path = os.path.join(COMPRESSED_FOLDER, filename)
-    compress_audio(input_path, compressed_path, target_sr=16000)
-
-    return jsonify({
-        "status": "success",
-        "compressed_file": f"/uploads/compressed/{filename}",
-        "preview": f"/uploads/compressed/{filename}"
-    })
-
+# ==========================
+# Test Video Compression
+# ==========================
 if __name__ == "__main__":
-    app.run(debug=True)
+    video_path = "sample_video.mp4"
+    compressed_video_data, huffman_codes = compress_video(video_path)
+    if compressed_video_data:
+        print("Video compression completed successfully.")
+    else:
+        print("Video compression failed.")
+
+import soundfile as sf
+from scipy.signal import resample
+import numpy as np
+import os
+
+def compress_audio(input_path, output_path, target_sr=16000):
+    """
+    Compress audio by resampling to lower sample rate
+    input_path: original audio file path
+    output_path: path to save compressed audio
+    target_sr: target sample rate in Hz (e.g., 16000)
+    """
+    data, sr = sf.read(input_path)  # read audio
+    if len(data.shape) > 1:
+        data = data.mean(axis=1)  # convert to mono
+
+    # Resample
+    num_samples = int(len(data) * target_sr / sr)
+    data_resampled = resample(data, num_samples)
+
+    # Save compressed audio
+    sf.write(output_path, data_resampled, target_sr, format='WAV')
+    return output_path
+
