@@ -1,0 +1,9 @@
+Compression denotes compact representation of data. In this lecture we exclusively cover compression of
+digital data. Examples for the kind of data you typically want to compress are e.g.
+• text
+• source-code
+• arbitrary files
+• images
+• video
+• audio data
+• speech
