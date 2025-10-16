@@ -1,9 +1,94 @@
-Compression denotes compact representation of data. In this lecture we exclusively cover compression of
-digital data. Examples for the kind of data you typically want to compress are e.g.
-• text
-• source-code
-• arbitrary files
-• images
-• video
-• audio data
-• speech
+from flask import Flask, request, jsonify, send_from_directory
+import os
+from compression import compress_video  # Keep your existing video compression
+from PIL import Image
+from compression import compress_audio 
+
+app = Flask(__name__, static_folder="static")
+UPLOAD_FOLDER = "uploads"
+COMPRESSED_FOLDER = os.path.join(UPLOAD_FOLDER, "compressed")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(COMPRESSED_FOLDER, exist_ok=True)
+
+# Helper to save uploaded file
+def save_file(file):
+    filename = file.filename
+    input_path = os.path.join(UPLOAD_FOLDER, filename)
+    file.save(input_path)
+    return input_path, filename
+
+# Serve frontend
+@app.route("/")
+def index():
+    return send_from_directory("static", "index.html")
+
+# Serve uploaded/compressed files
+@app.route("/uploads/<path:filename>")
+def serve_file(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=False)
+
+# ----------------- IMAGE -----------------
+def compress_image_file(input_path, output_path, quality=30):
+    img = Image.open(input_path)
+    img = img.convert("RGB")
+    img.save(output_path, "JPEG", optimize=True, quality=quality)
+
+@app.route("/compress/image", methods=["POST"])
+def compress_image_route():
+    if "file" not in request.files:
+        return jsonify({"status":"error", "message":"No file uploaded"}), 400
+
+    file = request.files["file"]
+    input_path, filename = save_file(file)
+    name, ext = os.path.splitext(filename)
+    compressed_path = os.path.join(COMPRESSED_FOLDER, f"{name}_compressed.jpg")
+    
+    compress_image_file(input_path, compressed_path)
+
+    return jsonify({
+        "status": "success",
+        "compressed_file": f"/uploads/compressed/{name}_compressed.jpg",
+        "preview": f"/uploads/compressed/{name}_compressed.jpg"
+    })
+
+# ----------------- VIDEO -----------------
+@app.route("/compress/video", methods=["POST"])
+def compress_video_route():
+    if "file" not in request.files:
+        return jsonify({"status":"error", "message":"No file uploaded"}), 400
+
+    file = request.files["file"]
+    input_path, filename = save_file(file)
+
+    compressed_data, huffman_codes = compress_video(input_path)
+    # For now, we just move the file as "compressed" (replace with real compressed video later)
+    compressed_path = os.path.join(COMPRESSED_FOLDER, filename)
+    os.rename(input_path, compressed_path)
+
+    return jsonify({
+        "status": "success",
+        "compressed_file": f"/uploads/compressed/{filename}",
+        "preview": f"/uploads/compressed/{filename}"
+    })
+
+
+
+@app.route("/compress/audio", methods=["POST"])
+def compress_audio_route():
+    if "file" not in request.files:
+        return jsonify({"status":"error", "message":"No file uploaded"}), 400
+
+    file = request.files["file"]
+    input_path, filename = save_file(file)
+
+    compressed_path = os.path.join(COMPRESSED_FOLDER, filename)
+    compress_audio(input_path, compressed_path, target_sr=16000)
+
+    return jsonify({
+        "status": "success",
+        "compressed_file": f"/uploads/compressed/{filename}",
+        "preview": f"/uploads/compressed/{filename}"
+    })
+
+if __name__ == "__main__":
+    app.run(debug=True)
